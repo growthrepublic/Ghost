@@ -181,6 +181,8 @@ coreHelpers.tags = function (options) {
 // `{{content}}`
 // `{{content words="20"}}`
 // `{{content characters="256"}}`
+// `{{content sections="2"}}`
+// `{{content removeLinks="1"}}`
 //
 // Turns content html into a safestring so that the user doesn't have to
 // escape it or tell handlebars to leave it alone with a triple-brace.
@@ -191,12 +193,12 @@ coreHelpers.tags = function (options) {
 //
 coreHelpers.content = function (options) {
     var truncateOptions = (options || {}).hash || {};
-    truncateOptions = _.pick(truncateOptions, ['words', 'characters']);
+    truncateOptions = _.pick(truncateOptions, ['words', 'characters', 'sections', 'removeLinks']);
     _.keys(truncateOptions).map(function (key) {
         truncateOptions[key] = parseInt(truncateOptions[key], 10);
     });
 
-    if (truncateOptions.hasOwnProperty('words') || truncateOptions.hasOwnProperty('characters')) {
+    if (truncateOptions.hasOwnProperty('words') || truncateOptions.hasOwnProperty('characters') || truncateOptions.hasOwnProperty('sections') || truncateOptions.hasOwnProperty('removeLinks')) {
         // Due to weirdness in downsize the 'words' option
         // must be passed as a string. refer to #1796
         // TODO: when downsize fixes this quirk remove this hack.
@@ -217,6 +219,7 @@ coreHelpers.content = function (options) {
 // `{{excerpt}}`
 // `{{excerpt words="50"}}`
 // `{{excerpt characters="256"}}`
+// `{{excerpt sections="2"}}`
 //
 // Attempts to remove all HTML from the string, and then shortens the result according to the provided option.
 //
@@ -228,7 +231,7 @@ coreHelpers.excerpt = function (options) {
     var truncateOptions = (options || {}).hash || {},
         excerpt;
 
-    truncateOptions = _.pick(truncateOptions, ['words', 'characters']);
+    truncateOptions = _.pick(truncateOptions, ['words', 'characters', 'sections']);
     _.keys(truncateOptions).map(function (key) {
         truncateOptions[key] = parseInt(truncateOptions[key], 10);
     });
@@ -238,7 +241,7 @@ coreHelpers.excerpt = function (options) {
     excerpt = excerpt.replace(/(\r\n|\n|\r)+/gm, ' ');
     /*jslint regexp:false */
 
-    if (!truncateOptions.words && !truncateOptions.characters) {
+    if (!truncateOptions.words && !truncateOptions.characters && !truncateOptions.sections) {
         truncateOptions.words = 50;
     }
 
