@@ -3,7 +3,7 @@ var downsize        = require('downsize'),
     moment          = require('moment'),
     path            = require('path'),
     polyglot        = require('node-polyglot').instance,
-    _               = require('underscore'),
+    _               = require('lodash'),
     when            = require('when'),
 
     api             = require('../api'),
@@ -12,15 +12,32 @@ var downsize        = require('downsize'),
     filters         = require('../filters'),
     template        = require('./template'),
     schema          = require('../data/schema').checks,
+    updateCheck     = require('../update-check'),
 
     assetTemplate   = _.template('<%= source %>?v=<%= version %>'),
+    linkTemplate    = _.template('<a href="<%= url %>"><%= text %></a>'),
     scriptTemplate  = _.template('<script src="<%= source %>?v=<%= version %>"></script>'),
     isProduction    = process.env.NODE_ENV === 'production',
 
     coreHelpers     = {},
-    registerHelpers;
+    registerHelpers,
 
+    scriptFiles = {
+        production: [
+            'ghost.min.js'
+        ],
+        development: [
+            'vendor.js',
+            'helpers.js',
+            'templates.js',
+            'models.js',
+            'views.js'
+        ]
+    };
 
+if (!isProduction) {
+    hbs.handlebars.logger.level = 0;
+}
 
 /**
  * [ description]
@@ -73,14 +90,45 @@ coreHelpers.encode = function (context, str) {
 // ### Page URL Helper
 //
 // *Usage example:*
-// `{{pageUrl 2}}`
+// `{{page_url 2}}`
 //
 // Returns the URL for the page specified in the current object
 // context.
 //
-coreHelpers.pageUrl = function (context, block) {
+coreHelpers.page_url = function (context, block) {
     /*jslint unparam:true*/
-    return config.paths().subdir + (context === 1 ? '/' : ('/page/' + context + '/'));
+    var url = config().paths.subdir;
+
+    if (this.tagSlug !== undefined) {
+        url += '/tag/' + this.tagSlug;
+    }
+
+    if (context > 1) {
+        url += '/page/' + context;
+    }
+
+    url += '/';
+
+    return url;
+};
+
+// ### Page URL Helper: DEPRECATED
+//
+// *Usage example:*
+// `{{pageUrl 2}}`
+//
+// Returns the URL for the page specified in the current object
+// context. This helper is deprecated and will be removed in future versions.
+//
+coreHelpers.pageUrl = function (context, block) {
+    errors.logWarn('Warning: pageUrl is deprecated, please use page_url instead\n' +
+                    'The helper pageUrl has been replaced with page_url in Ghost 0.5, and will be removed entirely in Ghost 0.6\n' +
+                    'In your theme\'s pagination.hbs file, pageUrl should be renamed to page_url');
+
+    /*jslint unparam:true*/
+    var self = this;
+
+    return coreHelpers.page_url.call(self, context, block);
 };
 
 // ### URL helper
@@ -96,10 +144,14 @@ coreHelpers.url = function (options) {
     var absolute = options && options.hash.absolute;
 
     if (schema.isPost(this)) {
-        return config.paths.urlForPost(api.settings, this, absolute);
+        return config.urlForPost(api.settings, this, absolute);
     }
 
-    return when(config.paths.urlFor(this, absolute));
+    if (schema.isTag(this)) {
+        return when(config.urlFor('tag', {tag: this}, absolute));
+    }
+
+    return when(config.urlFor(this, absolute));
 };
 
 // ### Asset helper
@@ -113,7 +165,7 @@ coreHelpers.asset = function (context, options) {
     var output = '',
         isAdmin = options && options.hash && options.hash.ghost;
 
-    output += config.paths().subdir + '/';
+    output += config().paths.subdir + '/';
 
     if (!context.match(/^favicon\.ico$/) && !context.match(/^shared/) && !context.match(/^asset/)) {
         if (isAdmin) {
@@ -162,17 +214,31 @@ coreHelpers.author = function (context, options) {
 // Note that the standard {{#each tags}} implementation is unaffected by this helper
 // and can be used for more complex templates.
 coreHelpers.tags = function (options) {
-    var separator = _.isString(options.hash.separator) ? options.hash.separator : ', ',
+    var autolink = _.isString(options.hash.autolink) && options.hash.autolink === "false" ? false : true,
+        separator = _.isString(options.hash.separator) ? options.hash.separator : ', ',
         prefix = _.isString(options.hash.prefix) ? options.hash.prefix : '',
         suffix = _.isString(options.hash.suffix) ? options.hash.suffix : '',
-        output = '',
-        tagNames = _.pluck(this.tags, 'name');
+        output = '';
 
-    if (tagNames.length) {
-        output = prefix + tagNames.join(separator) + suffix;
+    function createTagList(tags) {
+        var tagNames = _.pluck(tags, 'name');
+
+        if (autolink) {
+            return _.map(tags, function (tag) {
+                return linkTemplate({
+                    url: config.urlFor('tag', {tag: tag}),
+                    text: _.escape(tag.name)
+                });
+            }).join(separator);
+        }
+        return _.escape(tagNames.join(separator));
     }
 
-    return output;
+    if (this.tags && this.tags.length) {
+        output = prefix + createTagList(this.tags) + suffix;
+    }
+
+    return new hbs.handlebars.SafeString(output);
 };
 
 // ### Content Helper
@@ -253,10 +319,10 @@ coreHelpers.excerpt = function (options) {
 // ### Filestorage helper
 //
 // *Usage example:*
-// `{{fileStorage}}`
+// `{{file_storage}}`
 //
 // Returns the config value for fileStorage.
-coreHelpers.fileStorage = function (context, options) {
+coreHelpers.file_storage = function (context, options) {
     /*jslint unparam:true*/
     if (config().hasOwnProperty('fileStorage')) {
         return config().fileStorage.toString();
@@ -264,29 +330,17 @@ coreHelpers.fileStorage = function (context, options) {
     return "true";
 };
 
-coreHelpers.ghostScriptTags = function () {
-    var scriptFiles = [];
+coreHelpers.ghost_script_tags = function () {
+    var scriptList = isProduction ? scriptFiles.production : scriptFiles.development;
 
-    if (isProduction) {
-        scriptFiles.push("ghost.min.js");
-    } else {
-        scriptFiles = [
-            'vendor.js',
-            'helpers.js',
-            'templates.js',
-            'models.js',
-            'views.js'
-        ];
-    }
-
-    scriptFiles = _.map(scriptFiles, function (fileName) {
+    scriptList = _.map(scriptList, function (fileName) {
         return scriptTemplate({
-            source: config.paths().subdir + '/ghost/scripts/' + fileName,
+            source: config().paths.subdir + '/ghost/scripts/' + fileName,
             version: coreHelpers.assetHash
         });
     });
 
-    return scriptFiles.join('');
+    return scriptList.join('');
 };
 
 /*
@@ -299,7 +353,7 @@ coreHelpers.body_class = function (options) {
         tags = this.post && this.post.tags ? this.post.tags : this.tags || [],
         page = this.post && this.post.page ? this.post.page : this.page || false;
 
-    if (_.isString(this.relativeUrl) && this.relativeUrl.match(/\/page/)) {
+    if (_.isString(this.relativeUrl) && this.relativeUrl.match(/\/(page|tag)/)) {
         classes.push('archive-template');
     } else if (!this.relativeUrl || this.relativeUrl === '/' || this.relativeUrl === '') {
         classes.push('home-template');
@@ -359,7 +413,7 @@ coreHelpers.ghost_head = function (options) {
     head.push('<meta name="generator" content="Ghost ' + trimmedVersion + '" />');
 
     head.push('<link rel="alternate" type="application/rss+xml" title="'
-        + _.escape(blog.title)  + '" href="' + config.paths.urlFor('rss') + '">');
+        + _.escape(blog.title)  + '" href="' + config.urlFor('rss') + '">');
 
     return coreHelpers.url.call(self, {hash: {absolute: true}}).then(function (url) {
         head.push('<link rel="canonical" href="' + url + '" />');
@@ -376,7 +430,7 @@ coreHelpers.ghost_foot = function (options) {
     var foot = [];
 
     foot.push(scriptTemplate({
-        source: config.paths().subdir + '/shared/vendor/jquery/jquery.js',
+        source: config().paths.subdir + '/shared/vendor/jquery/jquery.js',
         version: coreHelpers.assetHash
     }));
 
@@ -388,14 +442,14 @@ coreHelpers.ghost_foot = function (options) {
 
 coreHelpers.meta_title = function (options) {
     /*jslint unparam:true*/
-    var title,
+    var title = "",
         blog;
 
     if (_.isString(this.relativeUrl)) {
         if (!this.relativeUrl || this.relativeUrl === '/' || this.relativeUrl === '' || this.relativeUrl.match(/\/page/)) {
             blog = config.theme();
             title = blog.title;
-        } else {
+        } else if (this.post) {
             title = this.post.title;
         }
     }
@@ -545,7 +599,13 @@ coreHelpers.pagination = function (options) {
         errors.logAndThrowError('Invalid value, check page, pages, limit and total are numbers');
         return;
     }
-    return template.execute('pagination', this.pagination);
+    var context = _.merge({}, this.pagination);
+
+    if (this.tag !== undefined) {
+        context.tagSlug = this.tag.slug;
+    }
+
+    return template.execute('pagination', context);
 };
 
 coreHelpers.helperMissing = function (arg) {
@@ -557,26 +617,30 @@ coreHelpers.helperMissing = function (arg) {
 
 // ## Admin URL helper
 // uses urlFor to generate a URL for either the admin or the frontend.
-coreHelpers.adminUrl = function (options) {
+coreHelpers.admin_url = function (options) {
     var absolute = options && options.hash && options.hash.absolute,
         // Ghost isn't a named route as currently it violates the must start-and-end with slash rule
         context = !options || !options.hash || !options.hash.frontend ? {relativeUrl: '/ghost'} : 'home';
 
-    return config.paths.urlFor(context, absolute);
+    return config.urlFor(context, absolute);
 };
 
-coreHelpers.updateNotification = function () {
+coreHelpers.update_notification = function (options) {
     var output = '';
 
     if (config().updateCheck === false || !this.currentUser) {
         return when(output);
     }
 
-    return api.settings.read('displayUpdateNotification').then(function (display) {
-        if (display && display.value && display.value === 'true') {
-            output = '<div class="notification-success">' +
-                'A new version of Ghost is available! Hot damn. ' +
-                '<a href="http://ghost.org/download">Upgrade now</a></div>';
+    return updateCheck.showUpdateNotification().then(function (result) {
+        if (result) {
+            if (options && options.hash && options.hash.classOnly) {
+                output = ' update-available';
+            } else {
+                output = '<div class="notification-success">' +
+                    'A new version of Ghost is available! Hot damn. ' +
+                    '<a href="http://ghost.org/download">Upgrade now</a></div>';
+            }
         }
 
         return output;
@@ -641,6 +705,8 @@ registerHelpers = function (adminHbs, assetHash) {
 
     registerThemeHelper('foreach', coreHelpers.foreach);
 
+    registerThemeHelper('page_url', coreHelpers.page_url);
+
     registerThemeHelper('pageUrl', coreHelpers.pageUrl);
 
     registerThemeHelper('pagination', coreHelpers.pagination);
@@ -667,16 +733,17 @@ registerHelpers = function (adminHbs, assetHash) {
     // Register admin helpers
     registerAdminHelper('asset', coreHelpers.asset);
 
-    registerAdminHelper('ghostScriptTags', coreHelpers.ghostScriptTags);
+    registerAdminHelper('ghost_script_tags', coreHelpers.ghost_script_tags);
 
-    registerAdminHelper('fileStorage', coreHelpers.fileStorage);
+    registerAdminHelper('file_storage', coreHelpers.file_storage);
 
-    registerAdminHelper('adminUrl', coreHelpers.adminUrl);
+    registerAdminHelper('admin_url', coreHelpers.admin_url);
 
-    registerAsyncAdminHelper('updateNotification', coreHelpers.updateNotification);
+    registerAsyncAdminHelper('update_notification', coreHelpers.update_notification);
 };
 
 module.exports = coreHelpers;
 module.exports.loadCoreHelpers = registerHelpers;
 module.exports.registerThemeHelper = registerThemeHelper;
 module.exports.registerAsyncThemeHelper = registerAsyncThemeHelper;
+module.exports.scriptFiles = scriptFiles;
